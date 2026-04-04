@@ -1,0 +1,9 @@
+node_modules/
+dist/
+server/data/dictionary-*.txt
+server/data/dictionary.txt
+server/data/db.json
+.env
+.env.local
+.claude/
+*.gif
