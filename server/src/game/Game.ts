@@ -27,9 +27,9 @@ export class Game {
     this.tileBag = new TileBag(lang);
   }
 
-  addPlayer(name: string, socketId: string, token?: string): string {
+  addPlayer(name: string, socketId: string, token?: string, isAI = false): string {
     const id = 'p' + nextPlayerId++;
-    this.players.push({ id, name, socketId, rack: [], score: 0, connected: true });
+    this.players.push({ id, name, socketId, rack: [], score: 0, connected: true, isAI });
     if (token) this.playerTokens.set(id, token);
     return id;
   }
@@ -53,10 +53,24 @@ export class Game {
   }
 
   playMove(playerId: string, placed: PlacedTileData[]): MoveResult {
+    if (!Array.isArray(placed)) return { valid: false, error: 'Invalid payload' };
+    if (placed.length === 0) return { valid: false, error: 'No tiles placed' };
+    if (placed.length > RACK_SIZE) return { valid: false, error: 'Too many tiles' };
+
     const pi = this.players.findIndex((p) => p.id === playerId);
     if (pi === -1) return { valid: false, error: 'Player not found' };
     if (pi !== this.currentPlayerIndex) return { valid: false, error: 'Not your turn' };
     if (this.status !== 'playing') return { valid: false, error: 'Game not in progress' };
+
+    // Reject duplicate tileIds (prevents tile-clone exploit on malicious clients)
+    const seenIds = new Set<string>();
+    for (const pt of placed) {
+      if (!pt || typeof pt.tileId !== 'string' || typeof pt.row !== 'number' || typeof pt.col !== 'number') {
+        return { valid: false, error: 'Invalid placement' };
+      }
+      if (seenIds.has(pt.tileId)) return { valid: false, error: 'Duplicate tile in move' };
+      seenIds.add(pt.tileId);
+    }
 
     const player = this.players[pi];
     for (const pt of placed) {
@@ -68,7 +82,7 @@ export class Game {
     const placements = placed.map((pt) => {
       const rackTile = player.rack.find((t) => t.id === pt.tileId)!;
       return {
-        tile: { ...rackTile, letter: rackTile.isBlank ? pt.letter.toUpperCase() : rackTile.letter },
+        tile: { ...rackTile, letter: rackTile.isBlank ? String(pt.letter ?? '').toUpperCase() : rackTile.letter },
         row: pt.row,
         col: pt.col,
       };
@@ -116,11 +130,17 @@ export class Game {
   }
 
   exchangeTiles(playerId: string, tileIds: string[]): MoveResult {
+    if (!Array.isArray(tileIds)) return { valid: false, error: 'Invalid payload' };
     const pi = this.players.findIndex((p) => p.id === playerId);
     if (pi !== this.currentPlayerIndex) return { valid: false, error: 'Not your turn' };
     if (this.status !== 'playing') return { valid: false, error: 'Game not in progress' };
     if (tileIds.length === 0) return { valid: false, error: 'Select tiles to exchange' };
+    if (tileIds.length > RACK_SIZE) return { valid: false, error: 'Too many tiles' };
     if (this.tileBag.remaining() < tileIds.length) return { valid: false, error: 'Not enough tiles in bag' };
+
+    // Reject duplicate tileIds
+    const uniq = new Set(tileIds);
+    if (uniq.size !== tileIds.length) return { valid: false, error: 'Duplicate tiles' };
 
     const player = this.players[pi];
     const removed: Tile[] = [];
@@ -141,7 +161,7 @@ export class Game {
   }
 
   private nextTurn(): void {
-    this.currentPlayerIndex = (this.currentPlayerIndex + 1) % 2;
+    this.currentPlayerIndex = (this.currentPlayerIndex + 1) % this.players.length;
     this.resetTurnTimer();
   }
 

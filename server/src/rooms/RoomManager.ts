@@ -55,12 +55,12 @@ export class RoomManager {
     return { code, playerId };
   }
 
-  joinGame(code: string, playerName: string, socketId: string, token?: string): { playerId: string; game: Game } | { error: string } {
+  joinGame(code: string, playerName: string, socketId: string, token?: string, isAI = false): { playerId: string; game: Game } | { error: string } {
     const game = this.games.get(code.toUpperCase());
     if (!game) return { error: 'Game not found' };
     if (game.status !== 'waiting') return { error: 'Game already started' };
     if (game.players.length >= 2) return { error: 'Game is full' };
-    const playerId = game.addPlayer(playerName, socketId, token);
+    const playerId = game.addPlayer(playerName, socketId, token, isAI);
     this.indexPlayer(code.toUpperCase(), playerId, socketId, token);
     game.start();
     return { playerId, game };
@@ -148,9 +148,28 @@ export class RoomManager {
     return { code, playerAssignments: assignments };
   }
 
-  cleanupFinished(): void {
+  /**
+   * Remove games that are safe to drop:
+   *  - finished and no human still connected, or
+   *  - waiting/playing but ALL human players disconnected for > staleMs (default 5 min).
+   * AI "players" never hold a game open (they have no real socket).
+   */
+  cleanupFinished(staleMs = 5 * 60_000): void {
+    const now = Date.now();
     for (const [code, game] of this.games) {
-      if (game.status === 'finished' && game.players.every((p) => !p.connected)) {
+      const humans = game.players.filter((p) => !p.isAI);
+      const noHumanConnected = humans.length === 0 || humans.every((p) => !p.connected);
+
+      if (game.status === 'finished' && noHumanConnected) {
+        this.removeGameIndexes(code);
+        this.games.delete(code);
+        this.rematchRequests.delete(code);
+        continue;
+      }
+
+      // Drop stale active games where no human has been connected for a while.
+      // turnStartedAt gives us a rough "last activity" timestamp.
+      if (noHumanConnected && game.turnStartedAt > 0 && now - game.turnStartedAt > staleMs) {
         this.removeGameIndexes(code);
         this.games.delete(code);
         this.rematchRequests.delete(code);

@@ -12,6 +12,7 @@ export interface Player {
   rack: Tile[];
   score: number;
   connected: boolean;
+  isAI?: boolean;
 }
 
 export interface PlacedTileData {

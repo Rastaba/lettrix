@@ -10,6 +10,7 @@ interface Props {
   previewScore: number | null;
   previewWords: string[];
   turnElapsed: number; // seconds since turn started (from server)
+  gameActive?: boolean;
   onSubmitMove: () => void;
   onRecall: () => void;
   onPass: () => void;
@@ -40,16 +41,17 @@ const NUDGES_EN = [
   { at: 300, msg: "5 minutes..." },
 ];
 
-export default function Controls({ isMyTurn, hasPlacedTiles, exchangeMode, hasExchangeSelection, canExchange, previewScore, previewWords, turnElapsed, onSubmitMove, onRecall, onPass, onToggleExchange, onSubmitExchange, onShuffle }: Props) {
+export default function Controls({ isMyTurn, hasPlacedTiles, exchangeMode, hasExchangeSelection, canExchange, previewScore, previewWords, turnElapsed, gameActive = true, onSubmitMove, onRecall, onPass, onToggleExchange, onSubmitExchange, onShuffle }: Props) {
   const { t, lang } = useLang();
 
   // Local tick to keep chrono smooth between server updates
   const [localElapsed, setLocalElapsed] = useState(turnElapsed);
   useEffect(() => { setLocalElapsed(turnElapsed); }, [turnElapsed]);
   useEffect(() => {
+    if (!gameActive) return; // stop ticking once the game ends
     const interval = setInterval(() => setLocalElapsed((e) => e + 1), 1000);
     return () => clearInterval(interval);
-  }, [isMyTurn]);
+  }, [isMyTurn, gameActive]);
 
   // Reset on turn change
   useEffect(() => { setLocalElapsed(0); }, [isMyTurn]);

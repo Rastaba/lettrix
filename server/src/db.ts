@@ -5,20 +5,22 @@ import bcrypt from 'bcrypt';
 import type { MoveHistoryEntry } from './types';
 
 const DB_FILE = path.join(__dirname, '../data/db.json');
+const DB_TMP = DB_FILE + '.tmp';
 const BCRYPT_ROUNDS = 12;
 
-function hashPwSync(password: string): string {
-  return bcrypt.hashSync(password, BCRYPT_ROUNDS);
+// Async bcrypt keeps the event loop responsive under load.
+function hashPw(password: string): Promise<string> {
+  return bcrypt.hash(password, BCRYPT_ROUNDS);
 }
 
-function verifyPw(password: string, hash: string): boolean {
+async function verifyPw(password: string, hash: string): Promise<boolean> {
   // Support legacy SHA256 hashes (64 hex chars) during migration
   if (hash.length === 64 && /^[a-f0-9]+$/.test(hash)) {
     const legacySalt = process.env.PASSWORD_SALT || 'lettrix-dev';
     const legacyHash = crypto.createHash('sha256').update(password + legacySalt).digest('hex');
     if (legacyHash === hash) return true;
   }
-  return bcrypt.compareSync(password, hash);
+  return bcrypt.compare(password, hash);
 }
 
 // ── Types ──
@@ -113,17 +115,36 @@ export function loadDB(): void {
 }
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
+let saving = false;
+let dirtyWhileSaving = false;
+
+// Atomic write: serialize → write tmp → rename. A crash mid-write never leaves
+// db.json truncated; worst case we lose the in-flight save.
+async function persistNow(): Promise<void> {
+  if (saving) { dirtyWhileSaving = true; return; }
+  saving = true;
+  try {
+    const dir = path.dirname(DB_FILE);
+    await fs.promises.mkdir(dir, { recursive: true });
+    const snapshot = JSON.stringify(db, null, 2);
+    await fs.promises.writeFile(DB_TMP, snapshot);
+    await fs.promises.rename(DB_TMP, DB_FILE);
+  } catch (e) {
+    console.error('DB save failed:', e);
+  } finally {
+    saving = false;
+    if (dirtyWhileSaving) {
+      dirtyWhileSaving = false;
+      scheduleSave();
+    }
+  }
+}
+
 function scheduleSave(): void {
   if (saveTimer) return;
   saveTimer = setTimeout(() => {
     saveTimer = null;
-    try {
-      const dir = path.dirname(DB_FILE);
-      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
-    } catch (e) {
-      console.error('DB save failed:', e);
-    }
+    void persistNow();
   }, 1000);
 }
 
@@ -334,7 +355,7 @@ export function isNameClaimed(name: string): boolean {
   return Object.values(db.players).some((p) => p.name.toLowerCase() === name.toLowerCase() && !!p.passwordHash);
 }
 
-export function claimName(token: string, password: string): { success: boolean; error?: string } {
+export async function claimName(token: string, password: string): Promise<{ success: boolean; error?: string }> {
   const player = db.players[token];
   if (!player) return { success: false, error: 'Player not found' };
   if (player.passwordHash) return { success: false, error: 'Already claimed' };
@@ -345,20 +366,21 @@ export function claimName(token: string, password: string): { success: boolean; 
   );
   if (conflict) return { success: false, error: 'Name already taken' };
 
-  player.passwordHash = hashPwSync(password);
+  player.passwordHash = await hashPw(password);
   scheduleSave();
   return { success: true };
 }
 
-export function loginWithPassword(name: string, password: string): { success: boolean; token?: string; error?: string } {
+export async function loginWithPassword(name: string, password: string): Promise<{ success: boolean; token?: string; error?: string }> {
   const player = Object.values(db.players).find(
     (p) => p.name.toLowerCase() === name.toLowerCase() && !!p.passwordHash,
   );
   if (!player) return { success: false, error: 'No account with this name' };
-  if (!verifyPw(password, player.passwordHash!)) return { success: false, error: 'Wrong password' };
+  const ok = await verifyPw(password, player.passwordHash!);
+  if (!ok) return { success: false, error: 'Wrong password' };
   // Migrate legacy SHA256 hash to bcrypt on successful login
   if (player.passwordHash!.length === 64 && /^[a-f0-9]+$/.test(player.passwordHash!)) {
-    player.passwordHash = hashPwSync(password);
+    player.passwordHash = await hashPw(password);
     scheduleSave();
   }
   return { success: true, token: player.token };

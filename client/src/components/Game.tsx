@@ -284,7 +284,7 @@ export default function Game(p: Props) {
           )}
           <Board board={p.gameState.board} placedTiles={p.placedTiles} lastMove={p.gameState.lastMove} isDragging={!!activeDragId} ghostTile={p.isMyTurn && !p.exchangeMode ? p.selectedTile : null} onCellClick={handleCellClick} />
           <Rack tiles={p.rackTiles} selectedTile={p.selectedTile} exchangeMode={p.exchangeMode} exchangeSelection={p.exchangeSelection} onTileClick={handleRackClick} />
-          <Controls isMyTurn={p.isMyTurn} hasPlacedTiles={p.placedTiles.size > 0} exchangeMode={p.exchangeMode} hasExchangeSelection={p.exchangeSelection.size > 0} canExchange={p.gameState.tilesRemaining >= 1} previewScore={preview?.score ?? null} previewWords={preview?.words ?? []} turnElapsed={p.gameState.turnElapsed ?? 0} onSubmitMove={p.onSubmitMove} onRecall={p.onRecall} onPass={handlePass} onToggleExchange={p.onToggleExchange} onSubmitExchange={p.onSubmitExchange} onShuffle={handleShuffle} />
+          <Controls isMyTurn={p.isMyTurn} hasPlacedTiles={p.placedTiles.size > 0} exchangeMode={p.exchangeMode} hasExchangeSelection={p.exchangeSelection.size > 0} canExchange={p.gameState.tilesRemaining >= 1} previewScore={preview?.score ?? null} previewWords={preview?.words ?? []} turnElapsed={p.gameState.turnElapsed ?? 0} gameActive={p.gameState.status === 'playing'} onSubmitMove={p.onSubmitMove} onRecall={p.onRecall} onPass={handlePass} onToggleExchange={p.onToggleExchange} onSubmitExchange={p.onSubmitExchange} onShuffle={handleShuffle} />
           {p.onSendReaction && <div className="flex justify-center"><ReactionBar onReact={p.onSendReaction} /></div>}
           <div className="lg:hidden w-full max-w-[600px]"><MoveHistory history={p.gameState.moveHistory} /></div>
         </div>

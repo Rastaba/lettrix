@@ -198,13 +198,21 @@ function triggerAIMoveIfNeeded(gameCode: string, game: Game) {
   });
 }
 
-// ── Nudge timer: broadcast state every 10s so clients update elapsed time ──
-
+// ── Nudge timer: re-sync turn clock every 10s.
+// We only broadcast if at least one human player is actually connected, and we
+// skip work entirely for AI-only or fully-abandoned games.
 setInterval(() => {
   for (const game of rooms.getAllGames()) {
-    if (game.status === 'playing') broadcastState(game);
+    if (game.status !== 'playing') continue;
+    if (!game.players.some((p) => !p.isAI && p.connected)) continue;
+    broadcastState(game);
   }
 }, 10000);
+
+// Periodic cleanup of abandoned / finished rooms (every minute).
+// Prevents memory leaks for AI games (AI player has no real socket) and for
+// waiting/playing games where every human has been gone for a while.
+setInterval(() => rooms.cleanupFinished(), 60_000);
 
 // ── Socket handlers ──
 
@@ -243,11 +251,13 @@ io.on('connection', (socket) => {
   // ── Matchmaking ──
 
   socket.on('find-match', ({ playerName, language, token }: { playerName: string; language?: string; token?: string }, cb) => {
+    const name = typeof playerName === 'string' ? playerName.trim().slice(0, 20) : '';
+    if (!name) { if (cb) cb({ matched: false, error: 'Invalid name' }); return; }
     const lang = language === 'fr' ? 'fr' : 'en';
-    if (token) db.getOrCreatePlayer(token, playerName);
-    socketInfo.set(socket.id, { name: playerName, ip });
+    if (token) db.getOrCreatePlayer(token, name);
+    socketInfo.set(socket.id, { name, ip });
 
-    const result = rooms.joinMatchQueue(socket.id, playerName, lang, token);
+    const result = rooms.joinMatchQueue(socket.id, name, lang, token);
     if (result.matched) {
       console.log(`🎯 ${tag(socket.id)} matched! Game ${result.code}`);
       // Join the socket room
@@ -287,7 +297,7 @@ io.on('connection', (socket) => {
     const { code, playerId } = rooms.createGame(playerName, socket.id, lang, token);
     socket.join(code);
     const aiName = getAIName(diff);
-    const joinResult = rooms.joinGame(code, aiName, 'ai-' + code, undefined);
+    const joinResult = rooms.joinGame(code, aiName, 'ai-' + code, undefined, true);
     if ('error' in joinResult) { cb({ error: joinResult.error }); return; }
 
     aiGames.set(code.toUpperCase(), { aiPlayerId: joinResult.playerId, difficulty: diff });
@@ -323,10 +333,12 @@ io.on('connection', (socket) => {
   });
 
   socket.on('create-game', ({ playerName, language, token }: { playerName: string; language?: string; token?: string }, cb) => {
+    const name = typeof playerName === 'string' ? playerName.trim().slice(0, 20) : '';
+    if (!name) return cb({ error: 'Invalid name' });
     const lang = language === 'fr' ? 'fr' : 'en';
-    if (token) db.getOrCreatePlayer(token, playerName);
-    socketInfo.set(socket.id, { name: playerName, ip });
-    const { code, playerId } = rooms.createGame(playerName, socket.id, lang, token);
+    if (token) db.getOrCreatePlayer(token, name);
+    socketInfo.set(socket.id, { name, ip });
+    const { code, playerId } = rooms.createGame(name, socket.id, lang, token);
     socket.join(code);
     console.log(`🆕 ${tag(socket.id)} created game ${code} (${lang.toUpperCase()})`);
     cb({ code, playerId });
@@ -335,9 +347,11 @@ io.on('connection', (socket) => {
   });
 
   socket.on('join-game', ({ code, playerName, token }: { code: string; playerName: string; token?: string }, cb) => {
-    if (token) db.getOrCreatePlayer(token, playerName);
-    socketInfo.set(socket.id, { name: playerName, ip });
-    const result = rooms.joinGame(code, playerName, socket.id, token);
+    const name = typeof playerName === 'string' ? playerName.trim().slice(0, 20) : '';
+    if (!name || typeof code !== 'string') return cb({ error: 'Invalid input' });
+    if (token) db.getOrCreatePlayer(token, name);
+    socketInfo.set(socket.id, { name, ip });
+    const result = rooms.joinGame(code, name, socket.id, token);
     if ('error' in result) { cb({ error: result.error }); return; }
     console.log(`🎮 ${tag(socket.id)} joined game ${code} → GAME START`);
     socket.join(code.toUpperCase());
@@ -354,8 +368,16 @@ io.on('connection', (socket) => {
   });
 
   socket.on('play-move', ({ gameCode, playerId, tiles }: any, cb) => {
+    if (typeof gameCode !== 'string' || typeof playerId !== 'string') {
+      return cb({ error: 'Invalid payload' });
+    }
     const game = rooms.getGame(gameCode);
     if (!game) { cb({ error: 'Game not found' }); return; }
+    // Socket must actually belong to this player (no spoofing via playerId)
+    const player = game.players.find((p) => p.id === playerId);
+    if (!player || player.socketId !== socket.id) {
+      return cb({ error: 'Not authorized' });
+    }
     const result = game.playMove(playerId, tiles);
     if (!result.valid) {
       console.log(`   ${tag(socket.id)} play REJECTED in ${gameCode}: ${result.error}`);
@@ -419,8 +441,15 @@ io.on('connection', (socket) => {
   });
 
   socket.on('pass-turn', ({ gameCode, playerId }: any, cb) => {
+    if (typeof gameCode !== 'string' || typeof playerId !== 'string') {
+      return cb({ error: 'Invalid payload' });
+    }
     const game = rooms.getGame(gameCode);
     if (!game) { cb({ error: 'Game not found' }); return; }
+    const player = game.players.find((p) => p.id === playerId);
+    if (!player || player.socketId !== socket.id) {
+      return cb({ error: 'Not authorized' });
+    }
     const result = game.passTurn(playerId);
     if (!result.valid) { cb({ error: result.error }); return; }
     console.log(`⏭️  ${tag(socket.id)} passed in ${gameCode}`);
@@ -459,8 +488,15 @@ io.on('connection', (socket) => {
   });
 
   socket.on('exchange-tiles', ({ gameCode, playerId, tileIds }: any, cb) => {
+    if (typeof gameCode !== 'string' || typeof playerId !== 'string') {
+      return cb({ error: 'Invalid payload' });
+    }
     const game = rooms.getGame(gameCode);
     if (!game) { cb({ error: 'Game not found' }); return; }
+    const player = game.players.find((p) => p.id === playerId);
+    if (!player || player.socketId !== socket.id) {
+      return cb({ error: 'Not authorized' });
+    }
     const result = game.exchangeTiles(playerId, tileIds);
     if (!result.valid) { cb({ error: result.error }); return; }
     console.log(`🔄 ${tag(socket.id)} exchanged ${tileIds.length} tiles in ${gameCode}`);
@@ -530,14 +566,20 @@ io.on('connection', (socket) => {
     cb({ claimed: db.isNameClaimed(name) });
   });
 
-  socket.on('claim-name', ({ token, password }: { token: string; password: string }, cb) => {
-    const result = db.claimName(token, password);
+  socket.on('claim-name', async ({ token, password }: { token: string; password: string }, cb) => {
+    if (typeof token !== 'string' || typeof password !== 'string' || password.length < 3 || password.length > 200) {
+      return cb({ success: false, error: 'Invalid input' });
+    }
+    const result = await db.claimName(token, password);
     if (result.success) console.log(`🔒 ${tag(socket.id)} claimed their name`);
     cb(result);
   });
 
-  socket.on('login', ({ name, password }: { name: string; password: string }, cb) => {
-    const result = db.loginWithPassword(name, password);
+  socket.on('login', async ({ name, password }: { name: string; password: string }, cb) => {
+    if (typeof name !== 'string' || typeof password !== 'string' || !name.trim() || password.length > 200) {
+      return cb({ success: false, error: 'Invalid input' });
+    }
+    const result = await db.loginWithPassword(name, password);
     if (result.success) {
       console.log(`🔑 ${name} logged in`);
       socketInfo.set(socket.id, { name, ip });
@@ -580,8 +622,14 @@ io.on('connection', (socket) => {
   // ── Emoji Reactions ──
 
   socket.on('send-reaction', ({ gameCode, playerId, emoji }: { gameCode: string; playerId: string; emoji: string }) => {
+    if (typeof gameCode !== 'string' || typeof playerId !== 'string' || typeof emoji !== 'string') return;
+    // Emoji payload: keep it short (1-2 glyphs). Prevents abuse via long strings.
+    if (emoji.length === 0 || emoji.length > 16) return;
     const game = rooms.getGame(gameCode);
     if (!game) return;
+    // Socket must own the claimed playerId
+    const sender = game.players.find((p) => p.id === playerId);
+    if (!sender || sender.socketId !== socket.id) return;
     if (!canSendReaction(playerId)) return;
     for (const p of game.players) {
       if (p.id !== playerId && p.connected) {
